@@ -59,6 +59,10 @@ public class PanService {
     void initialize() throws IOException {
         Files.createDirectories(root.resolve("files"));
         Files.createDirectories(root.resolve("tmp"));
+        Files.createDirectories(root.resolve("uploads"));
+        jdbc.query("SELECT id, size_bytes, inbox_token FROM upload_sessions WHERE finished = FALSE", row -> {
+            reservations.put(row.getString("id"), new Reservation(row.getLong("size_bytes"), row.getString("inbox_token")));
+        });
         if (jdbc.queryForObject("SELECT COUNT(*) FROM app_settings", Integer.class) == 0) {
             String password = properties.initialPassword();
             boolean generated = password == null || password.isBlank();
@@ -155,7 +159,7 @@ public class PanService {
     }
 
     public Path filePath(String id) {
-        // The filename is always a server-generated UUID, never the original filename.
+        // Storage paths use canonical UUIDs, never the original filename.
         try {
             return root.resolve("files").resolve(UUID.fromString(id).toString());
         } catch (IllegalArgumentException exception) {
@@ -169,40 +173,8 @@ public class PanService {
         String id = UUID.randomUUID().toString();
         long reserved;
         int days;
-        synchronized (quotaLock) {
-            Settings settings = settings();
-            days = retentionDays == null ? settings.retentionDays() : retentionDays;
-            if (days < 1 || days > 365) {
-                throw new ApiException(400, "文件保留天数须为 1～365 天");
-            }
-            long max = settings.maxFileBytes();
-            if (inboxToken != null) {
-                LinkItem inbox = activeLink(inboxToken, "INBOX");
-                max = Math.min(max, inbox.maxFileBytes());
-                long pending = reservations.values().stream().filter(item -> inboxToken.equals(item.inboxToken())).count();
-                Long count = jdbc.queryForObject("SELECT COUNT(*) FROM stored_files WHERE inbox_token = ?", Long.class, inboxToken);
-                if (count + pending >= inbox.maxFiles()) {
-                    throw new ApiException(413, "收件箱文件数量已达上限");
-                }
-            }
-            reserved = contentLength < 0 ? max : contentLength;
-            if (reserved > max) {
-                throw new ApiException(413, "文件超过单文件大小上限");
-            }
-            if (reserved > settings.quotaBytes() - usedBytes(null) - reservedBytes(null)) {
-                throw new ApiException(413, "存储空间不足");
-            }
-            if (inboxToken != null) {
-                LinkItem inbox = activeLink(inboxToken, "INBOX");
-                if (reserved > inbox.quotaBytes() - usedBytes(inboxToken) - reservedBytes(inboxToken)) {
-                    throw new ApiException(413, "收件箱剩余容量不足");
-                }
-            }
-            if (reservations.size() >= 8) {
-                throw new ApiException(429, "当前上传任务较多，请稍后再试");
-            }
-            reservations.put(id, new Reservation(reserved, inboxToken));
-        }
+        days = reserveUpload(id, contentLength, retentionDays, inboxToken);
+        synchronized (quotaLock) { reserved = reservations.get(id).bytes(); }
         Path temporary = root.resolve("tmp").resolve(id);
         Path destination = filePath(id);
         boolean committed = false;
@@ -242,6 +214,83 @@ public class PanService {
             Files.deleteIfExists(temporary);
             if (!committed) {
                 Files.deleteIfExists(destination);
+            }
+        }
+    }
+
+    Object quotaLock() { return quotaLock; }
+
+    int reserveUpload(String id, long contentLength, Integer retentionDays, String inboxToken) {
+        synchronized (quotaLock) {
+            Settings settings = settings();
+            int days = retentionDays == null ? settings.retentionDays() : retentionDays;
+            if (days < 1 || days > 365) {
+                throw new ApiException(400, "文件保留天数须为 1～365 天");
+            }
+            long max = settings.maxFileBytes();
+            if (inboxToken != null) {
+                LinkItem inbox = activeLink(inboxToken, "INBOX");
+                max = Math.min(max, inbox.maxFileBytes());
+                long pending = reservations.values().stream().filter(item -> inboxToken.equals(item.inboxToken())).count();
+                Long count = jdbc.queryForObject("SELECT COUNT(*) FROM stored_files WHERE inbox_token = ?", Long.class, inboxToken);
+                if (count + pending >= inbox.maxFiles()) {
+                    throw new ApiException(413, "收件箱文件数量已达上限");
+                }
+            }
+            long reserved = contentLength < 0 ? max : contentLength;
+            if (reserved > max) {
+                throw new ApiException(413, "文件超过单文件大小上限");
+            }
+            if (reserved > settings.quotaBytes() - usedBytes(null) - reservedBytes(null)) {
+                throw new ApiException(413, "存储空间不足");
+            }
+            if (inboxToken != null) {
+                LinkItem inbox = activeLink(inboxToken, "INBOX");
+                if (reserved > inbox.quotaBytes() - usedBytes(inboxToken) - reservedBytes(inboxToken)) {
+                    throw new ApiException(413, "收件箱剩余容量不足");
+                }
+            }
+            if (reservations.size() >= 8) {
+                throw new ApiException(429, "当前上传任务较多，请稍后再试");
+            }
+            reservations.put(id, new Reservation(reserved, inboxToken));
+            return days;
+        }
+    }
+
+    void releaseUpload(String id) { reservations.remove(id); }
+
+    FileItem finishUpload(String id, String name, long size, int days, String inboxToken, Path staging) throws IOException {
+        synchronized (quotaLock) {
+            if (inboxToken != null) activeLink(inboxToken, "INBOX");
+            long now = System.currentTimeMillis();
+            FileItem result = new FileItem(id, name, size, inboxToken, now + days * DAY_MS, now);
+            Path destination = filePath(id);
+            // A previous process may have moved the bytes just before its transaction was rolled back.
+            if (Files.exists(staging)) Files.move(staging, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            transactions.executeWithoutResult(status -> {
+                jdbc.update("INSERT INTO stored_files (id, original_name, size_bytes, inbox_token, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        id, name, size, inboxToken, result.expiresAt(), now);
+                jdbc.update("UPDATE upload_sessions SET finished = TRUE WHERE id = ?", id);
+            });
+            reservations.remove(id);
+            return result;
+        }
+    }
+
+    public LinkItem createText(TextRequest request) throws IOException {
+        synchronized (quotaLock) {
+            byte[] content = request.content().getBytes(StandardCharsets.UTF_8);
+            FileItem file = upload(new java.io.ByteArrayInputStream(content), "文本中转.txt", content.length, request.days(), null);
+            try {
+                return transactions.execute(status -> {
+                    LinkItem link = insertLink("TEXT", request.title(), "", request.password(), request.days(), 0, 0, 0);
+                    jdbc.update("INSERT INTO share_files (link_token, file_id) VALUES (?, ?)", link.token(), file.id());
+                    return link;
+                });
+            } catch (RuntimeException exception) {
+                deleteFile(file.id());
+                throw exception;
             }
         }
     }
@@ -368,8 +417,25 @@ public class PanService {
     public void cleanup() throws IOException {
         synchronized (quotaLock) {
             long now = System.currentTimeMillis();
-            List<String> expired = jdbc.queryForList("SELECT id FROM stored_files WHERE expires_at <= ?", String.class, now);
             int failures = 0;
+            List<String> expiredUploads = jdbc.queryForList("SELECT id FROM upload_sessions WHERE expires_at <= ?", String.class, now);
+            for (String id : expiredUploads) {
+                try {
+                    Files.deleteIfExists(root.resolve("uploads").resolve(id));
+                    jdbc.update("DELETE FROM upload_sessions WHERE id = ?", id);
+                    reservations.remove(id);
+                } catch (IOException exception) { failures++; }
+            }
+            Set<String> uploads = new HashSet<>(jdbc.queryForList("SELECT id FROM upload_sessions", String.class));
+            try (var staging = Files.list(root.resolve("uploads"))) {
+                for (Path path : staging.toList()) {
+                    if (!uploads.contains(path.getFileName().toString())) {
+                        try { Files.deleteIfExists(path); }
+                        catch (IOException exception) { failures++; }
+                    }
+                }
+            }
+            List<String> expired = jdbc.queryForList("SELECT id FROM stored_files WHERE expires_at <= ?", String.class, now);
             for (String id : expired) {
                 try {
                     deleteFile(id);
@@ -379,6 +445,7 @@ public class PanService {
             }
             // Recover unreferenced blobs left by a crash between move and database commit.
             Set<String> known = new HashSet<>(jdbc.queryForList("SELECT id FROM stored_files", String.class));
+            known.addAll(jdbc.queryForList("SELECT id FROM upload_sessions WHERE finished = FALSE", String.class));
             try (var files = Files.list(root.resolve("files"))) {
                 for (Path path : files.toList()) {
                     if (!known.contains(path.getFileName().toString())) {
@@ -409,7 +476,7 @@ public class PanService {
                 .mapToLong(Reservation::bytes).sum();
     }
 
-    private static String cleanFilename(String name) {
+    static String cleanFilename(String name) {
         if (name == null) {
             throw new ApiException(400, "缺少文件名");
         }

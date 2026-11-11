@@ -11,7 +11,7 @@ export interface FileItem {
 export interface LinkItem {
   token: string;
   code: string;
-  kind: "SHARE" | "INBOX";
+  kind: "SHARE" | "INBOX" | "TEXT";
   title: string;
   note: string;
   passwordProtected: boolean;
@@ -37,6 +37,7 @@ export interface Stats {
 export interface PublicLink {
   link: LinkItem;
   locked: boolean;
+  text?: string;
   files: FileItem[];
   usage?: { usedBytes: number; fileCount: number };
   systemMaxFileBytes?: number;
@@ -123,7 +124,7 @@ export function expiry(value: number) {
   return days <= 0 ? "已过期" : days === 1 ? "1 天内到期" : `${days} 天后到期`;
 }
 export function linkUrl(link: LinkItem) {
-  return `${location.origin}/${link.kind === "SHARE" ? "s" : "r"}/${link.token}`;
+  return `${location.origin}/${link.kind === "INBOX" ? "r" : "s"}/${link.token}`;
 }
 export async function copy(text: string) {
   try {

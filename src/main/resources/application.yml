@@ -29,6 +29,8 @@ spring:
       cache:
         period: 1h
   mvc:
+    async:
+      request-timeout: 30m
     problemdetails:
       enabled: false
 gugupan:

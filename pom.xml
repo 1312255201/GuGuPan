@@ -9,7 +9,7 @@
   </parent>
   <groupId>cn.gugupan</groupId>
   <artifactId>gugupan</artifactId>
-  <version>0.1.0</version>
+  <version>0.2.0</version>
   <name>GuGuPan</name>
   <description>咕咕盘 · 个人文件中转站</description>
   <properties><java.version>21</java.version></properties>

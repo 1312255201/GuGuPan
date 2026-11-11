@@ -35,3 +35,18 @@ CREATE TABLE IF NOT EXISTS share_files (
 );
 CREATE INDEX IF NOT EXISTS idx_files_expiry ON stored_files(expires_at);
 CREATE INDEX IF NOT EXISTS idx_files_inbox ON stored_files(inbox_token);
+CREATE TABLE IF NOT EXISTS upload_sessions (
+  id VARCHAR(36) PRIMARY KEY,
+  original_name VARCHAR(240) NOT NULL,
+  size_bytes BIGINT NOT NULL,
+  sha256 VARCHAR(64) NOT NULL,
+  inbox_token VARCHAR(64),
+  retention_days INT NOT NULL,
+  expires_at BIGINT NOT NULL,
+  finished BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE TABLE IF NOT EXISTS upload_parts (
+  upload_id VARCHAR(36) REFERENCES upload_sessions(id) ON DELETE CASCADE,
+  part_index INT NOT NULL,
+  PRIMARY KEY(upload_id, part_index)
+);

@@ -23,11 +23,13 @@ public class PanController {
     private final PanService service;
     private final RequestLimiter limiter;
     private final SessionRegistry sessions;
+    private final ChunkService chunks;
 
-    public PanController(PanService service, RequestLimiter limiter, SessionRegistry sessions) {
+    public PanController(PanService service, RequestLimiter limiter, SessionRegistry sessions, ChunkService chunks) {
         this.service = service;
         this.limiter = limiter;
         this.sessions = sessions;
+        this.chunks = chunks;
     }
 
     @GetMapping("/auth/session")
@@ -123,20 +125,27 @@ public class PanController {
     Map<String, String> resolve(@Valid @RequestBody CodeRequest request, HttpServletRequest http) {
         limiter.check("resolve:" + http.getRemoteAddr(), 40);
         LinkItem link = service.resolveCode(request.code());
-        return Map.of("path", ("SHARE".equals(link.kind()) ? "/s/" : "/r/") + link.token());
+        return Map.of("path", ("INBOX".equals(link.kind()) ? "/r/" : "/s/") + link.token());
     }
 
     @GetMapping("/public/links/{token}")
-    Map<String, Object> publicLink(@PathVariable String token, HttpSession session) {
+    Map<String, Object> publicLink(@PathVariable String token, HttpSession session) throws IOException {
         LinkItem link = service.activeLink(token, null);
         boolean locked = link.passwordProtected() && !hasGrant(session, token);
         Map<String, Object> result = new HashMap<>();
         result.put("link", link);
         result.put("locked", locked);
-        result.put("files", !locked && "SHARE".equals(link.kind()) ? service.shareFiles(token) : List.of());
+        result.put("files", !locked && !"INBOX".equals(link.kind()) ? service.shareFiles(token) : List.of());
         if (!locked && "INBOX".equals(link.kind())) {
             result.put("usage", service.inboxUsage(token));
             result.put("systemMaxFileBytes", service.settings().maxFileBytes());
+        }
+        if (!locked && "TEXT".equals(link.kind())) {
+            List<FileItem> texts = service.shareFiles(token);
+            if (texts.isEmpty()) throw new ApiException(410, "文本已过期或已删除");
+            FileItem text = service.availableFile(texts.getFirst().id());
+            if (text.size() > 400000) throw new ApiException(413, "文本内容过大");
+            result.put("text", java.nio.file.Files.readString(service.filePath(text.id()), StandardCharsets.UTF_8));
         }
         return result;
     }
@@ -164,7 +173,8 @@ public class PanController {
     @GetMapping("/public/links/{token}/files/{id}")
     ResponseEntity<Resource> publicDownload(@PathVariable String token, @PathVariable String id,
                                              HttpSession session) {
-        LinkItem link = service.activeLink(token, "SHARE");
+        LinkItem link = service.activeLink(token, null);
+        if ("INBOX".equals(link.kind())) throw new ApiException(400, "收件箱不能下载文件");
         requireGrant(link, session);
         boolean member = service.shareFiles(token).stream().anyMatch(file -> file.id().equals(id));
         if (!member) {
@@ -182,6 +192,95 @@ public class PanController {
         FileItem file = service.upload(request.getInputStream(), name, request.getContentLengthLong(), null, token);
         // Visitors get a receipt. They cannot use it to list or download inbox contents.
         return Map.of("name", file.name(), "size", file.size(), "received", true);
+    }
+
+    @PostMapping("/admin/texts")
+    LinkItem createText(@Valid @RequestBody TextRequest request) throws IOException {
+        return service.createText(request);
+    }
+
+    @PostMapping({"/admin/uploads", "/public/links/{token}/uploads"})
+    Map<String, Object> startUpload(@PathVariable(required = false) String token,
+                                    @Valid @RequestBody UploadRequest request, HttpServletRequest http) throws IOException {
+        checkUploadAccess(token, http);
+        limiter.check("chunks:" + http.getRemoteAddr(), 100);
+        return chunks.create(request, token);
+    }
+
+    @GetMapping({"/admin/uploads/{id}", "/public/links/{token}/uploads/{id}"})
+    Map<String, Object> uploadStatus(@PathVariable(required = false) String token,
+                                     @PathVariable String id, HttpServletRequest http) {
+        checkUploadAccess(token, http);
+        return chunks.status(id, token);
+    }
+
+    @PutMapping(value = {"/admin/uploads/{id}/parts/{index}", "/public/links/{token}/uploads/{id}/parts/{index}"},
+            consumes = MediaType.APPLICATION_OCTET_STREAM_VALUE)
+    Map<String, Boolean> uploadPart(@PathVariable(required = false) String token, @PathVariable String id,
+                                    @PathVariable int index, @RequestHeader("X-Chunk-SHA256") String hash,
+                                    HttpServletRequest http) throws IOException {
+        checkUploadAccess(token, http);
+        chunks.part(id, token, index, hash, http.getInputStream());
+        return Map.of("ok", true);
+    }
+
+    @PostMapping({"/admin/uploads/{id}/complete", "/public/links/{token}/uploads/{id}/complete"})
+    Map<String, Object> completeUpload(@PathVariable(required = false) String token,
+                                       @PathVariable String id, HttpServletRequest http) throws IOException {
+        checkUploadAccess(token, http);
+        FileItem file = chunks.finish(id, token);
+        return Map.of("name", file.name(), "size", file.size(), "received", true);
+    }
+
+    @DeleteMapping({"/admin/uploads/{id}", "/public/links/{token}/uploads/{id}"})
+    Map<String, Boolean> cancelUpload(@PathVariable(required = false) String token,
+                                      @PathVariable String id, HttpServletRequest http) throws IOException {
+        checkUploadAccess(token, http);
+        chunks.cancel(id, token);
+        return Map.of("ok", true);
+    }
+
+    private void checkUploadAccess(String token, HttpServletRequest http) {
+        if (token != null) requireGrant(service.activeLink(token, "INBOX"), http.getSession());
+    }
+
+    @GetMapping("/admin/files/archive")
+    ResponseEntity<org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody> adminArchive(@RequestParam List<String> ids) {
+        if (ids.isEmpty() || ids.size() > 100) throw new ApiException(400, "请选择 1～100 个文件");
+        return archive(ids.stream().distinct().map(service::availableFile).toList());
+    }
+
+    @GetMapping("/public/links/{token}/archive")
+    ResponseEntity<org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody> publicArchive(
+            @PathVariable String token, HttpSession session) {
+        requireGrant(service.activeLink(token, "SHARE"), session);
+        List<FileItem> files = service.shareFiles(token);
+        if (files.isEmpty()) throw new ApiException(410, "分享中的文件已过期或已删除");
+        files.forEach(file -> service.availableFile(file.id()));
+        return archive(files);
+    }
+
+    private ResponseEntity<org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody> archive(List<FileItem> files) {
+        return ResponseEntity.ok().contentType(MediaType.parseMediaType("application/zip"))
+                .cacheControl(CacheControl.noStore())
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"gugupan-files.zip\"")
+                .body(output -> {
+                    try (var zip = new java.util.zip.ZipOutputStream(output, StandardCharsets.UTF_8)) {
+                    Set<String> names = new HashSet<>();
+                    for (FileItem file : files) {
+                        String name = file.name();
+                        int suffix = 2;
+                        while (!names.add(name.toLowerCase(Locale.ROOT))) name = "(" + suffix++ + ") " + file.name();
+                        zip.putNextEntry(new java.util.zip.ZipEntry(name));
+                        try (var input = java.nio.file.Files.newInputStream(service.filePath(file.id()))) {
+                            input.transferTo(zip);
+                        }
+                        zip.closeEntry();
+                    }
+                    zip.finish();
+                    zip.flush();
+                    }
+                });
     }
 
     private ResponseEntity<Resource> downloadResponse(FileItem file) {

@@ -3,6 +3,7 @@ import { computed, ref, watch, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
   FolderOpen,
+  FileText,
   Link2,
   Inbox,
   Settings2,
@@ -31,6 +32,7 @@ import Brand from "../components/Brand.vue";
 import FileGlyph from "../components/FileGlyph.vue";
 import UploadBox from "../components/UploadBox.vue";
 import Modal from "../components/Modal.vue";
+import TextPanel from "../components/TextPanel.vue";
 import {
   api,
   auth,
@@ -59,6 +61,9 @@ const query = ref("");
 const source = ref("all");
 const selected = ref<string[]>([]);
 const page = ref(1);
+const archiveQuery = computed(() =>
+  new URLSearchParams({ ids: selected.value.join(",") }).toString(),
+);
 const uploadBox = ref<InstanceType<typeof UploadBox>>();
 const modal = ref<"share" | "inbox" | "result" | "">("");
 const saving = ref(false);
@@ -81,7 +86,7 @@ const newPassword = ref("");
 const repeatPassword = ref("");
 
 const tab = computed(() =>
-  ["shares", "inboxes", "settings"].includes(String(route.params.tab))
+  ["shares", "inboxes", "texts", "settings"].includes(String(route.params.tab))
     ? String(route.params.tab)
     : "files",
 );
@@ -90,6 +95,7 @@ const heading = computed(
     ({
       files: "我的文件",
       shares: "分享链接",
+      texts: "文本中转",
       inboxes: "收件箱",
       settings: "系统设置",
     })[tab.value],
@@ -99,6 +105,7 @@ const subheading = computed(
     ({
       files: "随时取用，也能轻松分享。",
       shares: "管理你发出的每一份文件。",
+      texts: "把文字和链接送到另一台设备。",
       inboxes: "创建一个链接，让文件向你飞来。",
       settings: "管理存储空间和管理员账号。",
     })[tab.value],
@@ -265,6 +272,11 @@ async function createLink() {
     saving.value = false;
   }
 }
+async function textCreated(link: LinkItem, password: string) {
+  resultPassword.value = password;
+  await showResult(link, true);
+  await load();
+}
 async function showResult(link: LinkItem, justCreated = false) {
   result.value = link;
   modal.value = "result";
@@ -378,6 +390,9 @@ async function changePassword() {
         >
         <RouterLink to="/admin/shares" :class="{ active: tab === 'shares' }"
           ><Link2 :size="20" />分享链接</RouterLink
+        >
+        <RouterLink to="/admin/texts" :class="{ active: tab === 'texts' }"
+          ><FileText :size="20" />文本中转</RouterLink
         >
         <RouterLink to="/admin/inboxes" :class="{ active: tab === 'inboxes' }"
           ><Inbox :size="20" />收件箱</RouterLink
@@ -523,6 +538,11 @@ async function changePassword() {
                 </div>
               </div>
               <div v-if="selected.length" class="selection-bar">
+                <a
+                  class="text-button"
+                  :href="`/api/admin/files/archive?${archiveQuery}`"
+                  ><Download :size="16" />打包下载</a
+                >
                 <span>已选择 {{ selected.length }} 个文件</span
                 ><button class="text-button" @click="openCreate('share')">
                   <Link2 :size="16" />创建分享</button
@@ -670,6 +690,12 @@ async function changePassword() {
               </div>
             </section>
           </template>
+          <TextPanel
+            v-else-if="tab === 'texts'"
+            :links="allLinks.filter((link) => link.kind === 'TEXT')"
+            @created="textCreated"
+            @changed="load"
+          />
           <template v-else-if="tab === 'shares' || tab === 'inboxes'">
             <div class="links-toolbar">
               <span
@@ -980,7 +1006,7 @@ async function changePassword() {
         <h3>{{ result.title }}</h3>
         <p>
           {{
-            result.kind === "SHARE"
+            result.kind !== "INBOX"
               ? "把链接发给对方，即可下载文件"
               : "把链接发给对方，即可向你上传文件"
           }}

@@ -32,4 +32,11 @@ public final class Models {
     public record SettingsRequest(@Min(1) @Max(1125899906842624L) long quotaBytes, @Min(1) @Max(1125899906842624L) long maxFileBytes,
                                    @Min(1) @Max(365) int retentionDays) {}
     public record CodeRequest(@NotBlank @Size(max = 16) String code) {}
+    public record TextRequest(@NotBlank @Size(max = 120) String title,
+                              @NotBlank @Size(max = 100000) String content,
+                              @Size(max = 64) String password, @Min(1) @Max(30) int days) {}
+    public record UploadRequest(@NotNull @Pattern(regexp = "[a-f0-9-]{36}") String id, @NotBlank @Size(max = 240) String name,
+                                @Min(0) @Max(1125899906842624L) long size,
+                                @NotNull @Pattern(regexp = "[a-f0-9]{64}") String sha256,
+                                @Min(1) @Max(365) Integer days) {}
 }

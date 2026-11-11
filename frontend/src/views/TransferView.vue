@@ -3,8 +3,10 @@ import { ref, onMounted, computed, watch } from "vue";
 import { useRoute } from "vue-router";
 import {
   Download,
+  Copy,
   Inbox,
   Link2,
+  FileText,
   LockKeyhole,
   Loader2,
   Clock3,
@@ -15,7 +17,15 @@ import {
 import Brand from "../components/Brand.vue";
 import FileGlyph from "../components/FileGlyph.vue";
 import UploadBox from "../components/UploadBox.vue";
-import { api, message, bytes, date, toast, type PublicLink } from "../api";
+import {
+  api,
+  message,
+  bytes,
+  date,
+  toast,
+  copy,
+  type PublicLink,
+} from "../api";
 const route = useRoute();
 const data = ref<PublicLink>();
 const password = ref("");
@@ -93,9 +103,15 @@ watch(token, () => {
         <span class="transfer-icon"
           ><LockKeyhole v-if="data.locked" :size="29" /><Inbox
             v-else-if="data.link.kind === 'INBOX'"
+            :size="29" /><FileText
+            v-else-if="data.link.kind === 'TEXT'"
             :size="29" /><Link2 v-else :size="29" /></span
         ><span class="eyebrow">{{
-          data.link.kind === "INBOX" ? "文件收件箱" : "有人给你分享了文件"
+          data.link.kind === "INBOX"
+            ? "文件收件箱"
+            : data.link.kind === "TEXT"
+              ? "文本中转"
+              : "有人给你分享了文件"
         }}</span>
         <h1>{{ data.link.title }}</h1>
         <p v-if="data.link.note" class="transfer-note">{{ data.link.note }}</p>
@@ -119,8 +135,30 @@ watch(token, () => {
             <Loader2 v-if="busy" :size="18" class="spin" />验证并打开
           </button>
         </form>
+        <section v-else-if="data.link.kind === 'TEXT'" class="text-transfer">
+          <div class="links-toolbar">
+            <button class="button primary" @click="copy(data.text || '')">
+              <Copy :size="16" />复制全文</button
+            ><a
+              v-if="data.files[0]"
+              class="button secondary"
+              :href="`/api/public/links/${token}/files/${data.files[0].id}`"
+              ><Download :size="16" />下载 TXT</a
+            >
+          </div>
+          <pre class="text-content">{{ data.text }}</pre>
+        </section>
         <template v-else-if="data.link.kind === 'SHARE'"
-          ><div v-if="data.files.length" class="public-file-list">
+          ><a
+            v-if="data.files.length > 1"
+            class="button primary archive-download"
+            :href="`/api/public/links/${token}/archive`"
+            ><Download :size="16" />全部打包下载（{{
+              data.files.length
+            }}
+            个文件）</a
+          >
+          <div v-if="data.files.length" class="public-file-list">
             <div
               v-for="file in data.files"
               :key="file.id"
@@ -156,6 +194,7 @@ watch(token, () => {
             此收件箱已满，请联系收件人。
           </div>
           <UploadBox
+            :key="token"
             :endpoint="`/public/links/${token}/files`"
             :max-bytes="
               Math.min(
@@ -169,9 +208,7 @@ watch(token, () => {
           />
           <p class="form-help">
             收件箱剩余 {{ bytes(remaining) }}，还可接收
-            {{
-              Math.max(0, data.link.maxFiles - (data.usage?.fileCount || 0))
-            }}
+            {{ Math.max(0, data.link.maxFiles - (data.usage?.fileCount || 0)) }}
             个文件。上传的文件仅收件人可查看。
           </p></template
         >
