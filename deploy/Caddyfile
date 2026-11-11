@@ -1,0 +1,7 @@
+{$GUGUPAN_DOMAIN} {
+    reverse_proxy app:8080 {
+        transport http {
+            response_header_timeout 30m
+        }
+    }
+}

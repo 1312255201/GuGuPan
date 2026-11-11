@@ -1,0 +1,40 @@
+server:
+  port: ${PORT:8080}
+  servlet:
+    session:
+      timeout: 8h
+      cookie:
+        http-only: true
+        same-site: lax
+        secure: ${COOKIE_SECURE:false}
+  tomcat:
+    connection-timeout: 30s
+spring:
+  application:
+    name: gugupan
+  datasource:
+    url: jdbc:h2:file:${gugupan.data-dir}/db/gugupan;DB_CLOSE_ON_EXIT=FALSE
+    username: sa
+    password: ''
+    hikari:
+      maximum-pool-size: 5
+  sql:
+    init:
+      mode: always
+  servlet:
+    multipart:
+      enabled: false
+  web:
+    resources:
+      cache:
+        period: 1h
+  mvc:
+    problemdetails:
+      enabled: false
+gugupan:
+  data-dir: ${GUGUPAN_DATA_DIR:./data}
+  initial-username: ${GUGUPAN_ADMIN_USERNAME:admin}
+  initial-password: ${GUGUPAN_ADMIN_PASSWORD:}
+logging:
+  level:
+    org.springframework.security: WARN

@@ -1,0 +1,9 @@
+/target/
+/data/
+/frontend/node_modules/
+/frontend/dist/
+/.idea/
+*.iml
+*.tsbuildinfo
+/.env
+/.local/

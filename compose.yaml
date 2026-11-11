@@ -1,0 +1,35 @@
+services:
+  app:
+    build: .
+    image: gugupan:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${GUGUPAN_PORT:-8080}:8080"
+    environment:
+      GUGUPAN_ADMIN_USERNAME: ${GUGUPAN_ADMIN_USERNAME:-admin}
+      GUGUPAN_ADMIN_PASSWORD: ${GUGUPAN_ADMIN_PASSWORD:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      SERVER_FORWARD_HEADERS_STRATEGY: native
+      SERVER_TOMCAT_REMOTEIP_INTERNAL_PROXIES: ${GUGUPAN_TRUSTED_PROXIES:-127\.0\.0\.1|172\.(1[6-9]|2[0-9]|3[01])\..*}
+    volumes:
+      - gugupan-data:/app/data
+    mem_limit: 1g
+    stop_grace_period: 30s
+  caddy:
+    image: caddy:2-alpine
+    profiles: [https]
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      GUGUPAN_DOMAIN: ${GUGUPAN_DOMAIN:-localhost}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [app]
+volumes:
+  gugupan-data:
+  caddy-data:
+  caddy-config:
